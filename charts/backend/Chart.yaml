@@ -1,0 +1,6 @@
+apiVersion: v2
+type: application
+name: backend
+description: Sausage Store Backend Component
+version: 0.1.0
+appVersion: "latest"

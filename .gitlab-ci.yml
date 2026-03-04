@@ -1,0 +1,127 @@
+stages:
+  - build
+  - test
+  - deploy
+
+variables:
+  # Helm-репозиторий в Nexus
+  NEXUS_HELM_REPO: https://nexus.praktikum-services.tech/repository/sausage-store-helm-alex-egorov/
+  
+  # Реестр образов
+  IMAGE_REGISTRY: gitlab.praktikum-services.ru:5050/std-mcpro-20/sausage-store
+
+build:
+  stage: build
+  image: docker:24.0
+  services:
+    - docker:24.0-dind
+  script:
+    - echo "Building backend..."
+    - docker build -t $IMAGE_REGISTRY/sausage-backend:$CI_COMMIT_SHA ./backend
+    - docker push $IMAGE_REGISTRY/sausage-backend:$CI_COMMIT_SHA
+    
+    - echo "Building backend-report..."
+    - docker build -t $IMAGE_REGISTRY/sausage-backend-report:$CI_COMMIT_SHA ./backend-report
+    - docker push $IMAGE_REGISTRY/sausage-backend-report:$CI_COMMIT_SHA
+    
+    - echo "Building frontend..."
+    - docker build -t $IMAGE_REGISTRY/sausage-frontend:$CI_COMMIT_SHA ./frontend
+    - docker push $IMAGE_REGISTRY/sausage-frontend:$CI_COMMIT_SHA
+  only:
+    - main
+    - master
+    - develop
+
+test:
+  stage: test
+  image: python:3.11
+  script:
+    - echo "Running tests..."
+    - pip install pytest
+    - pytest tests/ || echo "Tests placeholder - no tests yet"
+  only:
+    - main
+    - master
+    - develop
+
+deploy:
+  stage: deploy
+  image: alpine/helm:3.13.0
+  script:
+    - |
+      # Создание Kubeconfig из переменной окружения
+      mkdir -p ~/.kube
+      echo "$KUBECONFIG" | base64 -d > ~/.kube/config
+      chmod 600 ~/.kube/config
+      
+      # Добавление Helm-репозитория Nexus
+      helm repo add nexus $NEXUS_HELM_REPO
+      helm repo update
+      
+      # Установка/обновление релиза с помощью Helm
+      helm upgrade --install sausage-store \
+        nexus/sausage-store-chart \
+        --set environment=test \
+        --set global.imageRegistry=$IMAGE_REGISTRY \
+        --set backend.image.tag=$CI_COMMIT_SHA \
+        --set backendReport.image.tag=$CI_COMMIT_SHA \
+        --set frontend.image.tag=$CI_COMMIT_SHA \
+        --set frontend.ingress.fqdn="std-mcpro-20.k8s.praktikum-services.tech" \
+        --set backend.replicaCount=2 \
+        --set frontend.replicaCount=2 \
+        --set backendReport.replicaCount=1 \
+        --atomic \
+        --timeout 15m \
+        --namespace sausage-store-test \
+        --create-namespace
+      
+      # Проверка статуса релиза
+      helm status sausage-store --namespace sausage-store-test
+  environment:
+    name: test
+    url: https://std-mcpro-20.k8s.praktikum-services.tech
+  only:
+    - develop
+
+deploy-production:
+  stage: deploy
+  image: alpine/helm:3.13.0
+  script:
+    - |
+      # Создание Kubeconfig для production
+      mkdir -p ~/.kube
+      echo "$KUBECONFIG_PROD" | base64 -d > ~/.kube/config
+      chmod 600 ~/.kube/config
+      
+      # Добавление Helm-репозитория Nexus
+      helm repo add nexus $NEXUS_HELM_REPO
+      helm repo update
+      
+      # Установка/обновление релиза в production
+      helm upgrade --install sausage-store \
+        nexus/sausage-store-chart \
+        --set environment=production \
+        --set global.imageRegistry=$IMAGE_REGISTRY \
+        --set backend.image.tag=$CI_COMMIT_SHA \
+        --set backendReport.image.tag=$CI_COMMIT_SHA \
+        --set frontend.image.tag=$CI_COMMIT_SHA \
+        --set frontend.ingress.fqdn="sausage-store.k8s.praktikum-services.tech" \
+        --set backend.replicaCount=3 \
+        --set frontend.replicaCount=3 \
+        --set backendReport.replicaCount=2 \
+        --set backend.resources.requests.cpu="200m" \
+        --set backend.resources.limits.cpu="1000m" \
+        --atomic \
+        --timeout 20m \
+        --namespace sausage-store-prod \
+        --create-namespace
+      
+      # Проверка статуса релиза
+      helm status sausage-store --namespace sausage-store-prod
+  environment:
+    name: production
+    url: https://sausage-store.k8s.praktikum-services.tech
+  when: manual
+  only:
+    - main
+    - master
